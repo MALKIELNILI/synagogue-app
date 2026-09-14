@@ -10343,26 +10343,42 @@ function renderReport() {
     html += '</table></div>';
   }
 
-  // הכנסות מפורטות
-  html += '<div class="card report-section">';
-  html += '<div class="report-section-title"><span>💵 הכנסות</span><span class="section-total report-net-positive">₪' + totalIncome.toLocaleString() + '</span></div>';
-  if (incGroups.length > 0) {
-    incGroups.forEach(function(entry) {
-      html += '<div class="report-row">';
-      html += '<span class="rr-name">' + entry[0] + '</span>';
-      html += '<span class="rr-count">' + entry[1].count + ' פעמים</span>';
-      html += '<span class="rr-amt report-net-positive">₪' + entry[1].total.toLocaleString() + '</span>';
-      html += '</div>';
-    });
-  } else {
-    html += '<p style="text-align:center;color:var(--text-muted);padding:12px;">אין הכנסות בתקופה זו</p>';
+  // הכנסות — בדוח השנתי מציגים רק את טבלת החודשים למעלה (בלי פירוט לפי שם תורם).
+  // בדוח חודש בודד עדיין מוצג הפירוט המלא לפי שם, כי אין שם טבלת חודשים שמכסה את זה.
+  if (selectedMonth !== 'all') {
+    html += '<div class="card report-section">';
+    html += '<div class="report-section-title"><span>💵 הכנסות</span><span class="section-total report-net-positive">₪' + totalIncome.toLocaleString() + '</span></div>';
+    if (incGroups.length > 0) {
+      incGroups.forEach(function(entry) {
+        html += '<div class="report-row">';
+        html += '<span class="rr-name">' + entry[0] + '</span>';
+        html += '<span class="rr-count">' + entry[1].count + ' פעמים</span>';
+        html += '<span class="rr-amt report-net-positive">₪' + entry[1].total.toLocaleString() + '</span>';
+        html += '</div>';
+      });
+    } else {
+      html += '<p style="text-align:center;color:var(--text-muted);padding:12px;">אין הכנסות בתקופה זו</p>';
+    }
+    html += '</div>';
   }
-  html += '</div>';
 
-  // הוצאות מפורטות
+  // הוצאות — בדוח השנתי: סה"כ מרוכז אחד, ובנפרד רק הוצאות קבועות שחוזרות ב-6 חודשים או יותר.
+  // בדוח חודש בודד: הפירוט המלא כרגיל (אין טעם ל"קבועות" בטווח של חודש אחד).
   html += '<div class="card report-section">';
   html += '<div class="report-section-title"><span>📤 הוצאות</span><span class="section-total report-net-negative">₪' + totalExpense.toLocaleString() + '</span></div>';
-  if (expGroups.length > 0) {
+  if (selectedMonth === 'all') {
+    var fixedExpGroups = expGroups.filter(function(entry){ return entry[1].count >= 6; });
+    if (fixedExpGroups.length > 0) {
+      html += '<div style="font-size:0.85rem;color:var(--text-muted);margin:6px 0 8px;">🔁 הוצאות קבועות חודשיות (מופיעות 6 חודשים או יותר)</div>';
+      fixedExpGroups.forEach(function(entry) {
+        html += '<div class="report-row">';
+        html += '<span class="rr-name">' + entry[0] + '</span>';
+        html += '<span class="rr-count">' + entry[1].count + ' פעמים</span>';
+        html += '<span class="rr-amt report-net-negative">₪' + entry[1].total.toLocaleString() + '</span>';
+        html += '</div>';
+      });
+    }
+  } else if (expGroups.length > 0) {
     expGroups.forEach(function(entry) {
       html += '<div class="report-row">';
       html += '<span class="rr-name">' + entry[0] + '</span>';
