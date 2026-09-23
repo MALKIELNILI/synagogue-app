@@ -27,7 +27,7 @@ if ('serviceWorker' in navigator) {
   });
 }
 // בדוק גרסה — אם ישנה, טען מחדש
-const APP_VERSION = '20260913-v133';
+const APP_VERSION = '20260923-v134';
 if (localStorage.getItem('app_version') !== APP_VERSION) {
   localStorage.setItem('app_version', APP_VERSION);
   // מחק כל cache ואז טען מחדש
@@ -103,29 +103,47 @@ if (localStorage.getItem('app_version') !== APP_VERSION) {
   }
 
   // ══ MERGE — מזג Firebase + local, אל תאבד נתונים ══
+  function mergeArrays(fbArr, localArr) {
+    const getKey = x => x.id || x.date + '|' + (x.person||x.name||'') || JSON.stringify(x);
+    const localMap = new Map(localArr.map(x => [getKey(x), x]));
+    // לכל רשומה ב-Firebase — שמור paid25 מה-local אם local יותר עדכני
+    const result = fbArr.map(x => {
+      const local = localMap.get(getKey(x));
+      if (local && (local.paid25 || local.paid25amount)) {
+        return Object.assign({}, x, {
+          paid25: x.paid25 || local.paid25,
+          paid25amount: x.paid25amount || local.paid25amount
+        });
+      }
+      return x;
+    });
+    // הוסף רשומות שיש ב-local ואין ב-Firebase
+    const fbIds = new Set(fbArr.map(getKey));
+    localArr.forEach(x => { if (!fbIds.has(getKey(x))) result.push(x); });
+    return result;
+  }
+
   function mergeData(fbData, localData) {
     if (Array.isArray(fbData) && Array.isArray(localData)) {
-      const getKey = x => x.id || x.date + '|' + (x.person||x.name||'') || JSON.stringify(x);
-      const localMap = new Map(localData.map(x => [getKey(x), x]));
-      // לכל רשומה ב-Firebase — שמור paid25 מה-local אם local יותר עדכני
-      const result = fbData.map(x => {
-        const local = localMap.get(getKey(x));
-        if (local && (local.paid25 || local.paid25amount)) {
-          return Object.assign({}, x, {
-            paid25: x.paid25 || local.paid25,
-            paid25amount: x.paid25amount || local.paid25amount
-          });
-        }
-        return x;
-      });
-      // הוסף רשומות שיש ב-local ואין ב-Firebase
-      const fbIds = new Set(fbData.map(getKey));
-      localData.forEach(x => { if (!fbIds.has(getKey(x))) result.push(x); });
-      return result;
+      return mergeArrays(fbData, localData);
     }
-    if (typeof fbData === 'object' && !Array.isArray(fbData) &&
-        typeof localData === 'object' && !Array.isArray(localData)) {
-      return Object.assign({}, fbData, localData);
+    if (typeof fbData === 'object' && fbData && !Array.isArray(fbData) &&
+        typeof localData === 'object' && localData && !Array.isArray(localData)) {
+      // תיקון קריטי: bk_ledger וכיו"ב הם אובייקט לפי שם מתפלל, וכל ערך הוא מערך תנועות.
+      // Object.assign פשוט היה "דורס" את כל מערך התנועות של מתפלל אם היה שוני בין המכשירים —
+      // עכשיו ממזגים בפועל את מערך התנועות של כל מתפלל בנפרד, כדי לא לאבד תנועות משום מכשיר.
+      const result = Object.assign({}, fbData);
+      Object.keys(localData).forEach(key => {
+        const fbVal = fbData[key];
+        const localVal = localData[key];
+        if (Array.isArray(fbVal) && Array.isArray(localVal)) {
+          result[key] = mergeArrays(fbVal, localVal);
+        } else if (!(key in fbData)) {
+          result[key] = localVal;
+        }
+        // אם המפתח קיים בשני הצדדים ואינו מערך — נשארת גרסת Firebase (המשותפת לכולם)
+      });
+      return result;
     }
     return fbData;
   }
