@@ -27,7 +27,7 @@ if ('serviceWorker' in navigator) {
   });
 }
 // בדוק גרסה — אם ישנה, טען מחדש
-const APP_VERSION = '20260923-v133';
+const APP_VERSION = '20260925-v135';
 if (localStorage.getItem('app_version') !== APP_VERSION) {
   localStorage.setItem('app_version', APP_VERSION);
   // מחק כל cache ואז טען מחדש
@@ -48,6 +48,7 @@ if (localStorage.getItem('app_version') !== APP_VERSION) {
 <script type="module">
   import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js';
   import { getFirestore, doc, setDoc, getDoc, onSnapshot, runTransaction } from 'https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js';
+  import { getAuth, GoogleAuthProvider, signInWithPopup, signInWithRedirect, getRedirectResult, onAuthStateChanged, signOut } from 'https://www.gstatic.com/firebasejs/10.8.0/firebase-auth.js';
 
   const firebaseConfig = {
     apiKey: "AIzaSyAYbnoI-pzA0geri1pgWj15cTYncZ-ktqQ",
@@ -62,13 +63,61 @@ if (localStorage.getItem('app_version') !== APP_VERSION) {
   const app = initializeApp(firebaseConfig);
   const db = getFirestore(app);
 
+  // ══ AUTH — כתיבה לענן רק מחשבון Google מורשה (ראה firestore.rules) ══
+  // בלי התחברות: קריאה מהענן עובדת, שינויים נשמרים במכשיר ועולים אחרי ההתחברות.
+  const ALLOWED_EMAILS = ['m0509766686@gmail.com', 'malkielnili@gmail.com'];
+  const auth = getAuth(app);
+  let authed = false;
+  const pendingReplace = {};
+
+  function showAuthBar(user) {
+    let bar = document.getElementById('auth-bar');
+    if (!bar) {
+      bar = document.createElement('div');
+      bar.id = 'auth-bar';
+      bar.style.cssText = 'position:fixed;bottom:0;left:0;right:0;z-index:99999;background:#3a1212;border-top:2px solid #c9a84c;color:#fff;padding:10px 14px;display:flex;flex-wrap:wrap;gap:8px;align-items:center;justify-content:center;font-family:Assistant,sans-serif;font-size:0.95rem;direction:rtl;';
+      document.body.appendChild(bar);
+    }
+    const wrong = user && user.email;
+    bar.innerHTML = wrong
+      ? '<span>⛔ החשבון ' + user.email + ' לא מורשה לשמור. השינויים נשמרים רק במכשיר.</span><button id="auth-btn" style="padding:8px 16px;background:#c9a84c;color:#1a1a1a;border:none;border-radius:8px;font-weight:700;font-family:inherit;cursor:pointer;">החלף חשבון</button>'
+      : '<span>🔒 לא מחובר — השינויים נשמרים רק במכשיר הזה.</span><button id="auth-btn" style="padding:8px 16px;background:#c9a84c;color:#1a1a1a;border:none;border-radius:8px;font-weight:700;font-family:inherit;cursor:pointer;">התחבר עם Google</button>';
+    document.getElementById('auth-btn').onclick = () => wrong ? signOut(auth).then(login) : login();
+  }
+  function hideAuthBar() { const bar = document.getElementById('auth-bar'); if (bar) bar.remove(); }
+
+  function login() {
+    const provider = new GoogleAuthProvider();
+    provider.setCustomParameters({ prompt: 'select_account' });
+    signInWithPopup(auth, provider).catch(e => {
+      if (['auth/popup-blocked', 'auth/operation-not-supported-in-environment', 'auth/cancelled-popup-request'].includes(e.code)) return signInWithRedirect(auth, provider);
+      if (e.code !== 'auth/popup-closed-by-user') showToast('שגיאת התחברות: ' + e.code);
+    });
+  }
+  window.loginGoogle = login;
+  getRedirectResult(auth).catch(e => console.warn('redirect login:', e));
+
+  onAuthStateChanged(auth, user => {
+    authed = !!(user && user.email && user.emailVerified && ALLOWED_EMAILS.includes(user.email.toLowerCase()));
+    if (authed) {
+      hideAuthBar();
+      Object.keys(pendingReplace).forEach(key => { delete pendingReplace[key]; syncKey(key, { replace: true }); });
+      syncPending();
+    } else {
+      setSyncStatus('offline');
+      const show = () => showAuthBar(user);
+      document.body ? show() : document.addEventListener('DOMContentLoaded', show);
+    }
+  });
+
   // ══ SYNC STATUS — כמו סריקוב ══
   function setSyncStatus(s) {
     const dot = document.getElementById('syncDot');
     const lbl = document.getElementById('syncLabel');
     if (!dot || !lbl) return;
+    if (!authed && s === 'online') s = 'offline';
     dot.className = 'sync-dot ' + s;
-    lbl.textContent = s === 'online' ? 'מסונכרן' : s === 'saving' ? 'שומר…' : 'לא מחובר';
+    lbl.textContent = !authed ? 'לא מחובר לחשבון' : s === 'online' ? 'מסונכרן' : s === 'saving' ? 'שומר…' : 'לא מחובר';
   }
   window.setSyncStatus = setSyncStatus;
   window.addEventListener('online',  () => setSyncStatus('online'));
@@ -172,6 +221,12 @@ if (localStorage.getItem('app_version') !== APP_VERSION) {
   // opts.replace = true: דורס את הענן (לשחזור מגיבוי).
   const inflight = {};
   function syncKey(key, opts = {}) {
+    if (!authed) {
+      // לא מחובר — נשאר במכשיר (local שונה מ-base) ויעלה אחרי ההתחברות
+      if (opts.replace) pendingReplace[key] = true;
+      setSyncStatus('offline');
+      return Promise.resolve();
+    }
     if (inflight[key]) {
       inflight[key].again = true;
       if (opts.replace) inflight[key].replace = true;

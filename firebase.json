@@ -23,6 +23,7 @@
       "package.json",
       "package-lock.json",
       "firestore.rules",
+      "README*",
       "*.old"
     ],
     "headers": [

@@ -1,4 +1,4 @@
-const VERSION = '20260923-v48';
+const VERSION = '20260925-v49';
 
 self.addEventListener('install', e => {
   self.skipWaiting();
