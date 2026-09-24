@@ -27,7 +27,7 @@ if ('serviceWorker' in navigator) {
   });
 }
 // בדוק גרסה — אם ישנה, טען מחדש
-const APP_VERSION = '20260925-v135';
+const APP_VERSION = '20260925-v136';
 if (localStorage.getItem('app_version') !== APP_VERSION) {
   localStorage.setItem('app_version', APP_VERSION);
   // מחק כל cache ואז טען מחדש
@@ -51,7 +51,7 @@ if (localStorage.getItem('app_version') !== APP_VERSION) {
   import { getAuth, GoogleAuthProvider, signInWithPopup, signInWithRedirect, getRedirectResult, onAuthStateChanged, signOut } from 'https://www.gstatic.com/firebasejs/10.8.0/firebase-auth.js';
 
   const firebaseConfig = {
-    apiKey: "AIzaSyAYbnoI-pzA0geri1pgWj15cTYncZ-ktqQ",
+    apiKey: "AIzaSyAYbnoI-pzA0geri1pgWj15cTYncZ-klqQ",
     authDomain: "kupat-bet-kneset.firebaseapp.com",
     projectId: "kupat-bet-kneset",
     storageBucket: "kupat-bet-kneset.firebasestorage.app",
