@@ -27,7 +27,7 @@ if ('serviceWorker' in navigator) {
   });
 }
 // בדוק גרסה — אם ישנה, טען מחדש
-const APP_VERSION = '20260923-v134';
+const APP_VERSION = '20260923-v133';
 if (localStorage.getItem('app_version') !== APP_VERSION) {
   localStorage.setItem('app_version', APP_VERSION);
   // מחק כל cache ואז טען מחדש
@@ -47,7 +47,7 @@ if (localStorage.getItem('app_version') !== APP_VERSION) {
 <!-- Firebase SDK -->
 <script type="module">
   import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js';
-  import { getFirestore, doc, setDoc, getDoc, onSnapshot } from 'https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js';
+  import { getFirestore, doc, setDoc, getDoc, onSnapshot, runTransaction } from 'https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js';
 
   const firebaseConfig = {
     apiKey: "AIzaSyAYbnoI-pzA0geri1pgWj15cTYncZ-ktqQ",
@@ -74,16 +74,169 @@ if (localStorage.getItem('app_version') !== APP_VERSION) {
   window.addEventListener('online',  () => setSyncStatus('online'));
   window.addEventListener('offline', () => setSyncStatus('offline'));
 
+  // ══ SYNC — מיזוג תלת-כיווני, הענן הוא מקור האמת ══
+  // לכל מפתח נשמר "base" = מה שהמכשיר הזה ראה לאחרונה בענן.
+  // local מול base = מה שהשתנה במכשיר הזה. remote מול base = מה שהשתנה במכשירים אחרים.
+  // כך מכשיר עם נתונים ישנים לא דורס את הענן, ומחיקות לא חוזרות.
+  const SYNC_KEYS = ['bk_members','bk_ledger','bk_cash','bk_loans','bk_recurring','bk_shabbat_history','bk_netz_history'];
+  const BASE_PREFIX = 'bk_sync_base_';
+  const J = v => JSON.stringify(v);
+  const same = (a, b) => J(a) === J(b);
+  const SKIP = {};
+
+  function readLocal(key) {
+    try { const r = localStorage.getItem(key); return r ? JSON.parse(r) : null; } catch(e) { return null; }
+  }
+  function readBase(key) {
+    try { const r = localStorage.getItem(BASE_PREFIX + key); return r === null ? undefined : JSON.parse(r); } catch(e) { return undefined; }
+  }
+  function writeBase(key, v) { localStorage.setItem(BASE_PREFIX + key, J(v)); }
+
+  // מעבר ראשון לגרסה הזו: מה שיש כרגע במכשיר נחשב "כבר מסונכרן",
+  // כך שהענן גובר על נתונים ישנים, ורק מה שישתנה מעכשיו יעלה. עותק נשמר ליתר ביטחון.
+  SYNC_KEYS.forEach(key => {
+    if (readBase(key) === undefined) {
+      const raw = localStorage.getItem(key);
+      if (raw) localStorage.setItem('bk_presync_' + key, raw);
+      writeBase(key, readLocal(key));
+    }
+  });
+
+  function itemKey(x) {
+    if (!x || typeof x !== 'object' || Array.isArray(x)) return null;
+    if (x.id != null) return 'id:' + x.id;
+    if (x.date) return 'd:' + x.date + '|' + (x.parasha || '');
+    if (x.name) return 'n:' + x.name;
+    return null;
+  }
+  // מפה לפי מזהה; null אם אין מזהה ייחודי לכל פריט (אז המערך ממוזג כיחידה אחת)
+  function keyed(arr) {
+    const m = new Map();
+    for (const x of arr) { const k = itemKey(x); if (k === null || m.has(k)) return null; m.set(k, x); }
+    return m;
+  }
+  const isPlain = o => o !== null && typeof o === 'object' && !Array.isArray(o);
+
+  function mergeSide(inB, b, v) {
+    // קיים רק בצד אחד: אם הוא קיים ב-base ולא השתנה — הצד השני מחק אותו
+    if (inB && same(v, b)) return SKIP;
+    return v;
+  }
+
+  function merge3(base, local, remote) {
+    if (same(local, remote)) return local;
+    if (same(local, base))  return remote;
+    if (same(remote, base)) return local;
+    // שני הצדדים השתנו — מיזוג לפי פריט / שדה
+    if (Array.isArray(local) && Array.isArray(remote)) {
+      const bm = Array.isArray(base) ? keyed(base) : new Map();
+      const lm = keyed(local), rm = keyed(remote);
+      if (!bm || !lm || !rm) return local;
+      const out = [];
+      const keys = [...rm.keys(), ...[...lm.keys()].filter(k => !rm.has(k))];
+      for (const k of keys) {
+        const inB = bm.has(k), inL = lm.has(k), inR = rm.has(k);
+        let v;
+        if (inL && inR) v = merge3(inB ? bm.get(k) : undefined, lm.get(k), rm.get(k));
+        else if (inL)   v = mergeSide(inB, bm.get(k), lm.get(k));
+        else            v = mergeSide(inB, bm.get(k), rm.get(k));
+        if (v !== SKIP) out.push(v);
+      }
+      return out;
+    }
+    if (isPlain(local) && isPlain(remote)) {
+      const b = isPlain(base) ? base : {};
+      const out = {};
+      const keys = [...Object.keys(remote), ...Object.keys(local).filter(k => !(k in remote))];
+      for (const k of keys) {
+        const inB = k in b, inL = k in local, inR = k in remote;
+        let v;
+        if (inL && inR) v = merge3(inB ? b[k] : undefined, local[k], remote[k]);
+        else if (inL)   v = mergeSide(inB, b[k], local[k]);
+        else            v = mergeSide(inB, b[k], remote[k]);
+        if (v !== SKIP) out[k] = v;
+      }
+      return out;
+    }
+    return local; // ערך פשוט שהשתנה בשני הצדדים — הפעולה האחרונה במכשיר הזה גוברת
+  }
+
+  function isEmptyData(d) {
+    if (d === null || d === undefined) return true;
+    if (Array.isArray(d)) return d.length === 0;
+    if (typeof d === 'object') return Object.keys(d).length === 0;
+    return false;
+  }
+
+  // מסנכרן מפתח אחד מול הענן בטרנזקציה: קורא את המצב העדכני, ממזג, וכותב רק אם צריך.
+  // opts.replace = true: דורס את הענן (לשחזור מגיבוי).
+  const inflight = {};
+  function syncKey(key, opts = {}) {
+    if (inflight[key]) {
+      inflight[key].again = true;
+      if (opts.replace) inflight[key].replace = true;
+      return inflight[key].p;
+    }
+    const st = { again: false, replace: !!opts.replace };
+    inflight[key] = st;
+    st.p = (async () => {
+      try {
+        do {
+          st.again = false;
+          const replace = st.replace; st.replace = false;
+          setSyncStatus('saving');
+          const localStr = localStorage.getItem(key);
+          const local = localStr ? JSON.parse(localStr) : null;
+          const base = readBase(key);
+          const ref = doc(db, 'synagogue', key);
+          const merged = await runTransaction(db, async tx => {
+            const snap = await tx.get(ref);
+            if (replace || !snap.exists()) {
+              if (!isEmptyData(local)) tx.set(ref, { data: J(local), ts: Date.now() });
+              return local;
+            }
+            const remote = JSON.parse(snap.data().data);
+            const m = merge3(base === undefined ? local : base, local, remote);
+            if (!same(m, remote)) tx.set(ref, { data: J(m), ts: Date.now() });
+            return m;
+          });
+          if (localStorage.getItem(key) === localStr) {
+            localStorage.setItem(key, J(merged));
+            writeBase(key, merged);
+            if (!same(merged, local)) renderKey(key);
+          } else {
+            // נשמר שינוי נוסף בזמן הסנכרון — מסנכרנים שוב, כשהבסיס הוא הגרסה שממנה הוא נגזר
+            writeBase(key, local);
+            st.again = true;
+          }
+        } while (st.again);
+        setSyncStatus('online');
+      } catch(e) {
+        setSyncStatus('offline');
+        console.warn('Firebase sync error:', key, e);
+      } finally {
+        delete inflight[key];
+      }
+    })();
+    return st.p;
+  }
+
   // ══ SAVE ══
-  async function fbSave(key, data) {
-    try {
-      setSyncStatus('saving');
-      await setDoc(doc(db, 'synagogue', key), { data: JSON.stringify(data), ts: Date.now() });
-      setSyncStatus('online');
-    } catch(e) { setSyncStatus('offline'); console.warn('Firebase save error:', e); }
+  function fbSave(key, data, opts) {
+    if (data !== undefined) localStorage.setItem(key, J(data));
+    return syncKey(key, opts);
   }
   window._fb = { save: fbSave };
   window._fbReady = true;
+
+  // שינויים שנעשו בלי אינטרנט — עולים כשהחיבור חוזר / כשחוזרים לאפליקציה / כל דקה
+  function syncPending() {
+    if (!navigator.onLine) return;
+    SYNC_KEYS.forEach(key => { if (!same(readLocal(key), readBase(key))) syncKey(key); });
+  }
+  window.addEventListener('online', syncPending);
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') syncPending(); });
+  setInterval(syncPending, 60000);
 
   // ══ RENDER — עדכון UI לפי מפתח ══
   function renderKey(key) {
@@ -102,80 +255,31 @@ if (localStorage.getItem('app_version') !== APP_VERSION) {
     }
   }
 
-  // ══ MERGE — מזג Firebase + local, אל תאבד נתונים ══
-  function mergeArrays(fbArr, localArr) {
-    const getKey = x => x.id || x.date + '|' + (x.person||x.name||'') || JSON.stringify(x);
-    const localMap = new Map(localArr.map(x => [getKey(x), x]));
-    // לכל רשומה ב-Firebase — שמור paid25 מה-local אם local יותר עדכני
-    const result = fbArr.map(x => {
-      const local = localMap.get(getKey(x));
-      if (local && (local.paid25 || local.paid25amount)) {
-        return Object.assign({}, x, {
-          paid25: x.paid25 || local.paid25,
-          paid25amount: x.paid25amount || local.paid25amount
-        });
-      }
-      return x;
-    });
-    // הוסף רשומות שיש ב-local ואין ב-Firebase
-    const fbIds = new Set(fbArr.map(getKey));
-    localArr.forEach(x => { if (!fbIds.has(getKey(x))) result.push(x); });
-    return result;
-  }
-
-  function mergeData(fbData, localData) {
-    if (Array.isArray(fbData) && Array.isArray(localData)) {
-      return mergeArrays(fbData, localData);
-    }
-    if (typeof fbData === 'object' && fbData && !Array.isArray(fbData) &&
-        typeof localData === 'object' && localData && !Array.isArray(localData)) {
-      // תיקון קריטי: bk_ledger וכיו"ב הם אובייקט לפי שם מתפלל, וכל ערך הוא מערך תנועות.
-      // Object.assign פשוט היה "דורס" את כל מערך התנועות של מתפלל אם היה שוני בין המכשירים —
-      // עכשיו ממזגים בפועל את מערך התנועות של כל מתפלל בנפרד, כדי לא לאבד תנועות משום מכשיר.
-      const result = Object.assign({}, fbData);
-      Object.keys(localData).forEach(key => {
-        const fbVal = fbData[key];
-        const localVal = localData[key];
-        if (Array.isArray(fbVal) && Array.isArray(localVal)) {
-          result[key] = mergeArrays(fbVal, localVal);
-        } else if (!(key in fbData)) {
-          result[key] = localVal;
-        }
-        // אם המפתח קיים בשני הצדדים ואינו מערך — נשארת גרסת Firebase (המשותפת לכולם)
-      });
-      return result;
-    }
-    return fbData;
-  }
-
-  // ══ REAL-TIME LISTENERS — כמו REF.on('value') בסריקוב ══
-  const SYNC_KEYS = ['bk_members','bk_ledger','bk_cash','bk_loans','bk_recurring','bk_shabbat_history','bk_netz_history'];
+  // ══ REAL-TIME LISTENERS ══
   let firstFire = false;
 
   SYNC_KEYS.forEach(key => {
-    onSnapshot(doc(db, 'synagogue', key), async (snap) => {
+    onSnapshot(doc(db, 'synagogue', key), (snap) => {
+      if (snap.metadata.hasPendingWrites) return;
       setSyncStatus('online');
 
-      const localRaw = localStorage.getItem(key);
-      const localData = localRaw ? JSON.parse(localRaw) : null;
-
-      if (snap.exists()) {
+      if (!snap.exists()) {
+        if (!isEmptyData(readLocal(key))) syncKey(key); // הענן ריק — העלה מה-local
+      } else {
         try {
-          const fbData = JSON.parse(snap.data().data);
-          // מזג Firebase + local — אל תאבד נתונים מהטלפון
-          const merged = localData ? mergeData(fbData, localData) : fbData;
-          localStorage.setItem(key, JSON.stringify(merged));
-          // אם המיזוג הוסיף נתונים שלא היו ב-Firebase — העלה
-          if (JSON.stringify(merged).length > JSON.stringify(fbData).length) {
-            await fbSave(key, merged);
+          const remote = JSON.parse(snap.data().data);
+          const local = readLocal(key);
+          if (same(local, readBase(key))) {
+            // אין במכשיר שינויים שלא עלו — פשוט מתעדכנים מהענן
+            writeBase(key, remote);
+            if (!same(local, remote)) {
+              localStorage.setItem(key, J(remote));
+              renderKey(key);
+            }
+          } else {
+            syncKey(key); // יש שינויים מקומיים — ממזגים מול הענן
           }
-          renderKey(key);
-        } catch(e) {}
-      } else if (localData) {
-        // Firebase ריק — העלה מה-local
-        const isEmpty = Array.isArray(localData) ? localData.length === 0 :
-          typeof localData === 'object' ? Object.keys(localData).length === 0 : !localData;
-        if (!isEmpty) await fbSave(key, localData);
+        } catch(e) { console.warn('Firebase snapshot error:', key, e); }
       }
 
       if (!firstFire) {
@@ -2059,7 +2163,7 @@ if (localStorage.getItem('app_version') !== APP_VERSION) {
 
 <!-- Edit Loan Modal -->
 <div class="modal-overlay" id="edit-loan-modal">
-  <div class="modal" style="max-width:420px;">
+  <div class="modal" style="max-width:420px;max-height:90vh;overflow-y:auto;">
     <button class="modal-close" onclick="document.getElementById('edit-loan-modal').classList.remove('active')">✕</button>
     <h2 style="font-family:'Frank Ruhl Libre',serif;color:var(--gold);margin-bottom:20px;text-align:center;">✏️ עריכת הלוואה</h2>
     <input type="hidden" id="edit-loan-id">
@@ -2069,7 +2173,7 @@ if (localStorage.getItem('app_version') !== APP_VERSION) {
     </div>
     <div class="field" style="margin-bottom:14px;">
       <label>סכום ₪</label>
-      <input type="number" id="edit-loan-amount" style="width:100%;padding:11px 14px;background:var(--bg3);border:1px solid var(--border);border-radius:10px;color:var(--text);font-family:'Assistant',sans-serif;">
+      <input type="number" id="edit-loan-amount" oninput="updateEditRepaySummary()" style="width:100%;padding:11px 14px;background:var(--bg3);border:1px solid var(--border);border-radius:10px;color:var(--text);font-family:'Assistant',sans-serif;">
     </div>
     <div class="field" style="margin-bottom:14px;">
       <label>תאריך</label>
@@ -2082,6 +2186,17 @@ if (localStorage.getItem('app_version') !== APP_VERSION) {
     <div class="field" style="margin-bottom:20px;">
       <label>תנאי החזרה</label>
       <input type="text" id="edit-loan-terms" style="width:100%;padding:11px 14px;background:var(--bg3);border:1px solid var(--border);border-radius:10px;color:var(--text);font-family:'Assistant',sans-serif;">
+    </div>
+    <div style="border-top:1px solid var(--border);padding-top:16px;margin-top:4px;margin-bottom:16px;">
+      <div style="font-size:0.85rem;color:var(--gold);font-weight:700;margin-bottom:10px;">💰 החזרים</div>
+      <div id="edit-loan-repayments"></div>
+      <button type="button" class="loan-btn" onclick="addEditRepayment()" style="width:100%;margin-top:8px;background:rgba(96,208,128,0.15);color:#60d080;border:1px solid rgba(96,208,128,0.3);">➕ הוסף החזר</button>
+      <div id="edit-loan-repay-summary" style="font-size:0.8rem;color:var(--text-muted);margin-top:8px;"></div>
+      <label style="display:flex;align-items:center;gap:8px;margin-top:10px;font-size:0.8rem;color:var(--text-muted);cursor:pointer;">
+        <input type="checkbox" id="edit-loan-repay-cash" style="width:17px;height:17px;accent-color:var(--gold);">
+        לעדכן גם את ההוצאה "הלוואה ל…" בקופה לפי השינוי בהחזרים
+      </label>
+      <div style="font-size:0.72rem;color:var(--text-muted);margin-top:4px;">בלי הסימון — רק ההלוואה מתעדכנת, הקופה לא משתנה (מתאים לקיזוז שכבר נרשם בקופה בנפרד)</div>
     </div>
     <div style="border-top:1px solid var(--border);padding-top:16px;margin-top:4px;">
       <div style="font-size:0.85rem;color:var(--gold);font-weight:700;margin-bottom:12px;">✂️ ניכוי חודשי קבוע (מילגה)</div>
@@ -6623,17 +6738,20 @@ function restoreBackup(event) {
       if (backup.recurring)       localStorage.setItem('bk_recurring',       JSON.stringify(backup.recurring));
       if (backup.shabbat_history) localStorage.setItem('bk_shabbat_history', JSON.stringify(backup.shabbat_history));
       if (backup.netz_history)    localStorage.setItem('bk_netz_history',    JSON.stringify(backup.netz_history));
+      // שחזור דורס את הענן (replace), ומחכים שהשמירה תסתיים לפני רענון
+      const saves = [];
       if (window._fb) {
-        window._fb.save('bk_members',   backup.members);
-        window._fb.save('bk_ledger',    backup.ledger);
-        window._fb.save('bk_cash',      backup.cash);
-        window._fb.save('bk_loans',     backup.loans);
-        if (backup.shabbat_history) window._fb.save('bk_shabbat_history', backup.shabbat_history);
-        if (backup.netz_history)    window._fb.save('bk_netz_history',    backup.netz_history);
-        if (backup.recurring)       window._fb.save('bk_recurring',       backup.recurring);
+        const R = { replace: true };
+        saves.push(window._fb.save('bk_members',   backup.members, R));
+        saves.push(window._fb.save('bk_ledger',    backup.ledger,  R));
+        saves.push(window._fb.save('bk_cash',      backup.cash,    R));
+        saves.push(window._fb.save('bk_loans',     backup.loans,   R));
+        if (backup.shabbat_history) saves.push(window._fb.save('bk_shabbat_history', backup.shabbat_history, R));
+        if (backup.netz_history)    saves.push(window._fb.save('bk_netz_history',    backup.netz_history,    R));
+        if (backup.recurring)       saves.push(window._fb.save('bk_recurring',       backup.recurring,       R));
       }
       showToast('✅ הנתונים שוחזרו — מרענן...');
-      setTimeout(() => location.reload(), 1500);
+      Promise.all(saves).finally(() => setTimeout(() => location.reload(), 500));
     } catch(err) {
       showToast('❌ שגיאה בקריאת קובץ הגיבוי');
     }
@@ -10361,42 +10479,26 @@ function renderReport() {
     html += '</table></div>';
   }
 
-  // הכנסות — בדוח השנתי מציגים רק את טבלת החודשים למעלה (בלי פירוט לפי שם תורם).
-  // בדוח חודש בודד עדיין מוצג הפירוט המלא לפי שם, כי אין שם טבלת חודשים שמכסה את זה.
-  if (selectedMonth !== 'all') {
-    html += '<div class="card report-section">';
-    html += '<div class="report-section-title"><span>💵 הכנסות</span><span class="section-total report-net-positive">₪' + totalIncome.toLocaleString() + '</span></div>';
-    if (incGroups.length > 0) {
-      incGroups.forEach(function(entry) {
-        html += '<div class="report-row">';
-        html += '<span class="rr-name">' + entry[0] + '</span>';
-        html += '<span class="rr-count">' + entry[1].count + ' פעמים</span>';
-        html += '<span class="rr-amt report-net-positive">₪' + entry[1].total.toLocaleString() + '</span>';
-        html += '</div>';
-      });
-    } else {
-      html += '<p style="text-align:center;color:var(--text-muted);padding:12px;">אין הכנסות בתקופה זו</p>';
-    }
-    html += '</div>';
+  // הכנסות מפורטות
+  html += '<div class="card report-section">';
+  html += '<div class="report-section-title"><span>💵 הכנסות</span><span class="section-total report-net-positive">₪' + totalIncome.toLocaleString() + '</span></div>';
+  if (incGroups.length > 0) {
+    incGroups.forEach(function(entry) {
+      html += '<div class="report-row">';
+      html += '<span class="rr-name">' + entry[0] + '</span>';
+      html += '<span class="rr-count">' + entry[1].count + ' פעמים</span>';
+      html += '<span class="rr-amt report-net-positive">₪' + entry[1].total.toLocaleString() + '</span>';
+      html += '</div>';
+    });
+  } else {
+    html += '<p style="text-align:center;color:var(--text-muted);padding:12px;">אין הכנסות בתקופה זו</p>';
   }
+  html += '</div>';
 
-  // הוצאות — בדוח השנתי: סה"כ מרוכז אחד, ובנפרד רק הוצאות קבועות שחוזרות ב-6 חודשים או יותר.
-  // בדוח חודש בודד: הפירוט המלא כרגיל (אין טעם ל"קבועות" בטווח של חודש אחד).
+  // הוצאות מפורטות
   html += '<div class="card report-section">';
   html += '<div class="report-section-title"><span>📤 הוצאות</span><span class="section-total report-net-negative">₪' + totalExpense.toLocaleString() + '</span></div>';
-  if (selectedMonth === 'all') {
-    var fixedExpGroups = expGroups.filter(function(entry){ return entry[1].count >= 6; });
-    if (fixedExpGroups.length > 0) {
-      html += '<div style="font-size:0.85rem;color:var(--text-muted);margin:6px 0 8px;">🔁 הוצאות קבועות חודשיות (מופיעות 6 חודשים או יותר)</div>';
-      fixedExpGroups.forEach(function(entry) {
-        html += '<div class="report-row">';
-        html += '<span class="rr-name">' + entry[0] + '</span>';
-        html += '<span class="rr-count">' + entry[1].count + ' פעמים</span>';
-        html += '<span class="rr-amt report-net-negative">₪' + entry[1].total.toLocaleString() + '</span>';
-        html += '</div>';
-      });
-    }
-  } else if (expGroups.length > 0) {
+  if (expGroups.length > 0) {
     expGroups.forEach(function(entry) {
       html += '<div class="report-row">';
       html += '<span class="rr-name">' + entry[0] + '</span>';
@@ -11204,7 +11306,6 @@ function confirmRepayment() {
   if (idx < 0) return;
   const loan = loans[idx];
 
-  loan.repayments = loan.repayments || [];
   loan.repayments.push({ id: Date.now(), amount, date, note });
   loan.remaining = Math.max(0, loan.remaining - amount);
   if (loan.remaining === 0) loan.closed = true;
@@ -11258,54 +11359,117 @@ function deleteLoan(loanId) {
   showToast('🗑 ההלוואה נמחקה מכל המקומות');
 }
 
+// "5.2.2026" <-> "2026-02-05" (לשדות תאריך)
+function heDateToIso(s) {
+  const m = String(s || '').match(/^(\d{1,2})\.(\d{1,2})\.(\d{4})$/);
+  return m ? `${m[3]}-${m[2].padStart(2,'0')}-${m[1].padStart(2,'0')}` : '';
+}
+function isoToHeDate(iso) {
+  const m = String(iso || '').match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  return m ? `${+m[3]}.${+m[2]}.${m[1]}` : '';
+}
+
+let _editRepayments = [];
+
 function openEditLoanModal(loanId) {
   const loan = loadLoans().find(l => l.id === loanId);
   if (!loan) return;
   document.getElementById('edit-loan-id').value = loanId;
   document.getElementById('edit-loan-borrower').value = loan.borrower;
-  document.getElementById('edit-loan-amount').value = loan.amount;
-  document.getElementById('edit-loan-date').value = loan.date;
+  document.getElementById('edit-loan-amount').value = loan.originalAmount;
+  document.getElementById('edit-loan-date').value = heDateToIso(loan.date);
   document.getElementById('edit-loan-phone').value = loan.phone || '';
   document.getElementById('edit-loan-terms').value = loan.terms || '';
   document.getElementById('edit-loan-monthly-amount').value = loan.monthlyDeduct || '';
   document.getElementById('edit-loan-monthly-desc').value = loan.monthlyDesc || '';
+  document.getElementById('edit-loan-repay-cash').checked = false;
+  _editRepayments = (loan.repayments || []).map(r => Object.assign({}, r));
+  renderEditRepayments();
   document.getElementById('edit-loan-modal').classList.add('active');
 }
 
+function renderEditRepayments() {
+  const inp = 'padding:8px 8px;background:var(--bg3);border:1px solid var(--border);border-radius:8px;color:var(--text);font-family:\'Assistant\',sans-serif;min-width:0;';
+  const el = document.getElementById('edit-loan-repayments');
+  el.innerHTML = _editRepayments.length ? _editRepayments.map((r, i) => `
+    <div style="display:flex;gap:6px;align-items:center;margin-bottom:8px;flex-wrap:wrap;padding:8px;border:1px solid var(--border);border-radius:10px;">
+      <input type="date" value="${heDateToIso(r.date)}" onchange="updateEditRepayment(${i},'date',this.value)" style="${inp}flex:1 1 120px;">
+      <input type="number" value="${r.amount}" min="0" oninput="updateEditRepayment(${i},'amount',this.value)" placeholder="₪" style="${inp}flex:0 1 90px;">
+      <input type="text" value="${String(r.note || '').replace(/"/g,'&quot;')}" oninput="updateEditRepayment(${i},'note',this.value)" placeholder="הערה" style="${inp}flex:2 1 120px;">
+      <button type="button" onclick="removeEditRepayment(${i})" class="loan-btn loan-btn-del" style="flex:0 0 auto;">🗑</button>
+    </div>`).join('')
+    : '<div style="font-size:0.8rem;color:var(--text-muted);">אין החזרים</div>';
+  updateEditRepaySummary();
+}
+
+function updateEditRepayment(i, field, val) {
+  const r = _editRepayments[i];
+  if (!r) return;
+  if (field === 'amount') r.amount = parseFloat(val) || 0;
+  else if (field === 'date') { const d = isoToHeDate(val); if (d) r.date = d; }
+  else r.note = val;
+  updateEditRepaySummary();
+}
+
+function addEditRepayment() {
+  _editRepayments.push({ id: Date.now(), amount: 0, date: new Date().toLocaleDateString('he-IL'), note: '' });
+  renderEditRepayments();
+}
+
+function removeEditRepayment(i) {
+  _editRepayments.splice(i, 1);
+  renderEditRepayments();
+}
+
+function updateEditRepaySummary() {
+  const orig = parseFloat(document.getElementById('edit-loan-amount').value) || 0;
+  const repaid = _editRepayments.reduce((s, r) => s + (+r.amount || 0), 0);
+  document.getElementById('edit-loan-repay-summary').textContent =
+    `סה"כ הוחזר: ₪${repaid.toLocaleString()} · נשאר: ₪${Math.max(0, Math.round((orig - repaid) * 100) / 100).toLocaleString()}`;
+}
+
 function saveEditLoan() {
-  const loanId = parseInt(document.getElementById('edit-loan-id').value);
+  const loanId = parseFloat(document.getElementById('edit-loan-id').value);
   const loans = loadLoans();
-  const idx = loans.findIndex(l => l.id === loanId);
+  const idx = loans.findIndex(l => l.id == loanId);
   if (idx === -1) return;
   const loan = loans[idx];
+  const oldBorrower = loan.borrower;
+  const oldAmount = loan.originalAmount || 0;
+  const oldRepaid = (loan.repayments || []).reduce((s, r) => s + (+r.amount || 0), 0);
 
   const newAmount = parseFloat(document.getElementById('edit-loan-amount').value) || 0;
-  loan.repayments = loan.repayments || [];
-  const totalRepaid = loan.repayments.reduce((s, r) => s + r.amount, 0);
+  if (newAmount <= 0) { showToast('⚠️ הכנס סכום הלוואה'); return; }
+  const repayments = _editRepayments.filter(r => (+r.amount || 0) > 0);
+  const newRepaid = repayments.reduce((s, r) => s + (+r.amount || 0), 0);
 
-  loans[idx].borrower       = document.getElementById('edit-loan-borrower').value.trim();
-  loans[idx].originalAmount = newAmount;
-  loans[idx].remaining      = Math.max(0, newAmount - totalRepaid);
-  loans[idx].closed         = loans[idx].remaining === 0;
-  loans[idx].date           = document.getElementById('edit-loan-date').value;
-  loans[idx].phone          = document.getElementById('edit-loan-phone').value.trim();
-  loans[idx].terms          = document.getElementById('edit-loan-terms').value.trim();
+  loan.borrower       = document.getElementById('edit-loan-borrower').value.trim() || oldBorrower;
+  loan.originalAmount = newAmount;
+  loan.repayments     = repayments;
+  loan.remaining      = Math.max(0, Math.round((newAmount - newRepaid) * 100) / 100);
+  loan.closed         = loan.remaining === 0;
+  loan.date           = isoToHeDate(document.getElementById('edit-loan-date').value) || loan.date;
+  loan.phone          = document.getElementById('edit-loan-phone').value.trim();
+  loan.terms          = document.getElementById('edit-loan-terms').value.trim();
   const monthlyAmt = parseFloat(document.getElementById('edit-loan-monthly-amount').value) || 0;
-  loans[idx].monthlyDeduct  = monthlyAmt || null;
-  loans[idx].monthlyDesc    = document.getElementById('edit-loan-monthly-desc').value.trim() || null;
+  loan.monthlyDeduct  = monthlyAmt || null;
+  loan.monthlyDesc    = document.getElementById('edit-loan-monthly-desc').value.trim() || null;
 
-  // עדכן גם את ההוצאה בקופה
+  // עדכן את ההוצאה בקופה רק בהפרש שהשתנה (סכום ההלוואה, ואם סומן — גם ההחזרים)
   const txns = loadCash();
-  const cashIdx = txns.findIndex(t => t.desc === `הלוואה ל${loan.borrower}`);
-  if (cashIdx !== -1) {
-    txns[cashIdx].amount = newAmount;
-    txns[cashIdx].desc = `הלוואה ל${loans[idx].borrower}`;
+  const cashIdx = txns.findIndex(t => t.desc === `הלוואה ל${oldBorrower}` && (t.type === 'expense' || t.type === 'loan_out'));
+  let delta = newAmount - oldAmount;
+  if (document.getElementById('edit-loan-repay-cash').checked) delta -= (newRepaid - oldRepaid);
+  if (cashIdx !== -1 && (delta !== 0 || loan.borrower !== oldBorrower)) {
+    txns[cashIdx].amount = Math.max(0, Math.round((txns[cashIdx].amount + delta) * 100) / 100);
+    txns[cashIdx].desc = `הלוואה ל${loan.borrower}`;
     saveCash(txns);
   }
 
   saveLoans(loans);
   document.getElementById('edit-loan-modal').classList.remove('active');
   renderLoans();
+  if (document.getElementById('tab-cash')?.classList.contains('active')) renderCash();
   showToast('✅ ההלוואה עודכנה');
 }
 
@@ -11362,7 +11526,6 @@ function renderLoans() {
   listEl.innerHTML = loans.slice().reverse().map(l => {
     const paidSoFar = l.originalAmount - l.remaining;
     const pct = Math.round((paidSoFar / l.originalAmount) * 100);
-    l.repayments = l.repayments || [];
     const repayHistory = l.repayments.length ? l.repayments.map(r =>
       `<div style="font-size:0.77rem;color:var(--text-muted);padding:2px 0;">✅ ₪${r.amount.toLocaleString()} — ${r.date}${r.note?' · '+r.note:''}</div>`
     ).join('') : '';

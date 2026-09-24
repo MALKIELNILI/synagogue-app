@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html dir="rtl" lang="he">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+  <title>כרטסת אישית</title>
+  <link href="https://fonts.googleapis.com/css2?family=Assistant:wght@400;600;700;800&family=Frank+Ruhl+Libre:wght@400;700&display=swap" rel="stylesheet">
+  <style>
+    * { margin:0; padding:0; box-sizing:border-box; }
+    body {
+      background:#1a1a1a; color:#e0e0e0;
+      font-family:'Assistant',Arial,sans-serif;
+      direction:rtl; padding:16px;
+      min-height:100vh;
+    }
+    .wrap { max-width:500px; margin:0 auto; }
+    .header { text-align:center; padding:24px 0 20px; }
+    .synagogue-name { font-size:0.82rem; color:#888; margin-bottom:8px; }
+    .member-name { font-family:'Frank Ruhl Libre',serif; font-size:1.7rem; color:#c9a84c; margin-bottom:14px; }
+    .balance-badge {
+      display:inline-block; padding:10px 24px;
+      border-radius:24px; border:1px solid; font-weight:800; font-size:1.1rem;
+    }
+    .section-title { font-size:0.8rem; color:#888; margin:16px 0 8px; text-align:center; }
+    .txn-row {
+      background:#222; border-radius:10px; padding:12px 14px;
+      margin-bottom:8px;
+      display:flex; justify-content:space-between; align-items:flex-start;
+    }
+    .txn-row.charge { border-right:3px solid #e74c3c; }
+    .txn-row.payment { border-right:3px solid #27ae60; }
+    .txn-label { font-weight:700; font-size:0.92rem; }
+    .txn-note { color:#aaa; font-size:0.80rem; margin-top:3px; }
+    .txn-date { color:#666; font-size:0.73rem; margin-top:2px; }
+    .txn-amount { font-weight:800; font-size:1.05rem; text-align:left; }
+    .txn-bal { font-size:0.72rem; margin-top:4px; text-align:left; }
+    .footer { text-align:center; margin-top:28px; color:#444; font-size:0.72rem; padding-bottom:16px; }
+    .loading { text-align:center; color:#888; padding:40px 0; font-size:0.95rem; }
+    .error { text-align:center; color:#e74c3c; padding:30px 0; }
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <div class="header">
+    <div class="synagogue-name" id="syn-name">בית המדרש "אלי בעזרי"</div>
+    <div class="member-name" id="member-name">טוען...</div>
+    <div class="balance-badge" id="balance-badge" style="color:#888;border-color:#888;">טוען...</div>
+  </div>
+  <div class="section-title">היסטוריית תנועות</div>
+  <div id="txn-list"><div class="loading">⏳ טוען נתונים...</div></div>
+  <div class="footer">כרטסת אישית — לצפייה בלבד</div>
+</div>
+
+<script type="module">
+import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js';
+import { getFirestore, doc, onSnapshot } from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js';
+
+const firebaseConfig = {
+  apiKey: "AIzaSyAYbnoI-pzA0geri1pgWj15cTYncZ-ktqQ",
+  authDomain: "kupat-bet-kneset.firebaseapp.com",
+  projectId: "kupat-bet-kneset",
+  storageBucket: "kupat-bet-kneset.firebasestorage.app",
+  messagingSenderId: "790785227227",
+  appId: "1:790785227227:web:bc498dce755bcb77178ffe"
+};
+
+const app = initializeApp(firebaseConfig);
+const db  = getFirestore(app);
+
+const params     = new URLSearchParams(window.location.search);
+const memberName = decodeURIComponent(params.get('n') || params.get('member') || '');
+
+if (!memberName) {
+  document.getElementById('member-name').textContent = 'קישור שגוי';
+  document.getElementById('txn-list').innerHTML = '<div class="error">לא נמצא שם מתפלל בקישור</div>';
+} else {
+  document.getElementById('member-name').textContent = memberName;
+  document.title = 'כרטסת — ' + memberName;
+
+  onSnapshot(doc(db, 'synagogue', 'bk_ledger'), snap => {
+    if (!snap.exists()) { showError('אין נתונים'); return; }
+    try {
+      const ledger = JSON.parse(snap.data().data || '{}');
+      render(ledger[memberName] || []);
+    } catch(e) { showError('שגיאה בטעינת הנתונים'); }
+  });
+
+  // synagogue name
+  onSnapshot(doc(db, 'synagogue', 'bk_settings'), snap => {
+    if (!snap.exists()) return;
+    try {
+      const s = JSON.parse(snap.data().data || '{}');
+      if (s.synagogueName) document.getElementById('syn-name').textContent = s.synagogueName;
+    } catch(e) {}
+  });
+}
+
+function parseLedgerDate(d) {
+  if (!d) return 0;
+  const p = d.split(/[./]/);
+  if (p.length === 3) {
+    const y = parseInt(p[2]) < 100 ? 2000 + parseInt(p[2]) : parseInt(p[2]);
+    return new Date(y, parseInt(p[1])-1, parseInt(p[0])).getTime();
+  }
+  return new Date(d).getTime() || 0;
+}
+
+function render(txns) {
+  let balance = 0;
+  txns.forEach(t => {
+    if (t.type === 'charge')  balance += parseFloat(t.amount) || 0;
+    if (t.type === 'payment') balance -= parseFloat(t.amount) || 0;
+  });
+
+  const sorted = txns.slice().sort((a,b) => parseLedgerDate(a.date) - parseLedgerDate(b.date));
+  let running = 0;
+  const balMap = {};
+  sorted.forEach(t => {
+    running += t.type === 'charge' ? (parseFloat(t.amount)||0) : -(parseFloat(t.amount)||0);
+    balMap[t.id] = running;
+  });
+
+  // Badge
+  const badge = document.getElementById('balance-badge');
+  if (balance > 0) {
+    badge.textContent = `חוב: ₪${balance.toLocaleString()}`;
+    badge.style.color = '#e74c3c'; badge.style.borderColor = '#e74c3c';
+    badge.style.background = 'rgba(231,76,60,0.12)';
+  } else if (balance < 0) {
+    badge.textContent = `זכות: ₪${Math.abs(balance).toLocaleString()}`;
+    badge.style.color = '#27ae60'; badge.style.borderColor = '#27ae60';
+    badge.style.background = 'rgba(39,174,96,0.12)';
+  } else {
+    badge.textContent = '✅ מאוזן';
+    badge.style.color = '#888'; badge.style.borderColor = '#555';
+    badge.style.background = 'rgba(136,136,136,0.1)';
+  }
+
+  if (txns.length === 0) {
+    document.getElementById('txn-list').innerHTML = '<div class="loading">אין תנועות עדיין</div>';
+    return;
+  }
+
+  // Display newest first
+  const display = sorted.slice().reverse();
+  document.getElementById('txn-list').innerHTML = display.map(t => {
+    const isCharge = t.type === 'charge';
+    const color  = isCharge ? '#e74c3c' : '#27ae60';
+    const bal    = balMap[t.id] ?? 0;
+    const balClr = bal > 0 ? '#e74c3c' : bal < 0 ? '#27ae60' : '#888';
+    return `
+      <div class="txn-row ${isCharge ? 'charge' : 'payment'}">
+        <div>
+          <div class="txn-label" style="color:${color};">${isCharge ? '🛒 רכישה' : '✅ תשלום'}</div>
+          ${t.note ? `<div class="txn-note">${t.note}</div>` : ''}
+          <div class="txn-date">${t.date || ''}</div>
+        </div>
+        <div>
+          <div class="txn-amount" style="color:${color};">${isCharge ? '+' : '−'}₪${(parseFloat(t.amount)||0).toLocaleString()}</div>
+          <div class="txn-bal" style="color:${balClr};">יתרה: ₪${bal.toLocaleString()}</div>
+        </div>
+      </div>`;
+  }).join('');
+}
+
+function showError(msg) {
+  document.getElementById('txn-list').innerHTML = `<div class="error">${msg}</div>`;
+}
+</script>
+</body>
+</html>

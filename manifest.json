@@ -1,0 +1,15 @@
+{
+  "name": "בית המדרש אלי בעזרי",
+  "short_name": "אלי בעזרי",
+  "description": "מערכת ניהול בית המדרש",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f1f5f9",
+  "theme_color": "#1e3a5f",
+  "lang": "he",
+  "dir": "rtl",
+  "icons": [
+    { "src": "icon.jpg", "sizes": "192x192", "type": "image/jpeg" },
+    { "src": "icon.jpg", "sizes": "512x512", "type": "image/jpeg" }
+  ]
+}

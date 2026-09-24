@@ -1,0 +1,9 @@
+node_modules/
+.firebase/
+*.log
+גיבויים/
+גיבוי*.json
+*backup*
+*.bat
+*.exe
+*.pdf

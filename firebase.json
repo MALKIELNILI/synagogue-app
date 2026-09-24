@@ -1,0 +1,57 @@
+{
+  "firestore": {
+    "rules": "firestore.rules"
+  },
+  "hosting": {
+    "public": ".",
+    "ignore": [
+      "firebase.json",
+      "**/.*",
+      "**/node_modules/**",
+      "*.bat",
+      "*.pdf",
+      "import_new_members.js",
+      "deploy.bat",
+      "*.exe",
+      "*backup*",
+      "*.html.html",
+      "גיבויים/**",
+      "גיבוי*.json",
+      "live_index.html",
+      "synagogue-app*.html",
+      "mark-paid23.js",
+      "package.json",
+      "package-lock.json",
+      "firestore.rules",
+      "*.old"
+    ],
+    "headers": [
+      {
+        "source": "/sw.js",
+        "headers": [
+          {
+            "key": "Cache-Control",
+            "value": "no-cache, no-store, must-revalidate"
+          },
+          {
+            "key": "Pragma",
+            "value": "no-cache"
+          }
+        ]
+      },
+      {
+        "source": "/index.html",
+        "headers": [
+          {
+            "key": "Cache-Control",
+            "value": "no-cache, no-store, must-revalidate"
+          },
+          {
+            "key": "Pragma",
+            "value": "no-cache"
+          }
+        ]
+      }
+    ]
+  }
+}
